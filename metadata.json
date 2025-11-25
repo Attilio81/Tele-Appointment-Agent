@@ -1,0 +1,7 @@
+{
+  "name": "AI Tele-Appointment Agent",
+  "description": "Un'applicazione dashboard per automatizzare le chiamate ai clienti, utilizzare un'IA vocale (Gemini Live) per conversare e prenotare appuntamenti.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
