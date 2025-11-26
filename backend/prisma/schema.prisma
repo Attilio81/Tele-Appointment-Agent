@@ -1,0 +1,40 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Slot {
+  id              Int           @id @default(autoincrement())
+  date            DateTime
+  startTime       String
+  endTime         String
+  maxCapacity     Int           @default(1)
+  currentBookings Int           @default(0)
+  isBooked        Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  appointments    Appointment[]
+
+  @@unique([date, startTime])
+}
+
+model Appointment {
+  id              Int       @id @default(autoincrement())
+  slotId          Int
+  slot            Slot      @relation(fields: [slotId], references: [id])
+  customerName    String
+  customerPhone   String?
+  customerEmail   String?
+  appointmentType String?
+  notes           String?
+  status          String    @default("Confermato") // Confermato, Cancellato
+  bookedAt        DateTime  @default(now())
+  cancelledAt     DateTime?
+}

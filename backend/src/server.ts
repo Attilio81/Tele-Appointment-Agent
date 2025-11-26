@@ -2,7 +2,7 @@ import express, { Application, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import appointmentRoutes from './routes/appointmentRoutes';
-import { getConnectionPool, closeConnection } from './config/database';
+import prisma from './config/database';
 
 // Carica variabili d'ambiente
 dotenv.config();
@@ -72,7 +72,7 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 async function startServer() {
     try {
         // Test connessione database
-        await getConnectionPool();
+        await prisma.$connect();
         console.log('✅ Database connesso');
 
         // Avvia server
@@ -90,13 +90,13 @@ async function startServer() {
 // Gestione chiusura graceful
 process.on('SIGINT', async () => {
     console.log('\n🛑 Chiusura server...');
-    await closeConnection();
+    await prisma.$disconnect();
     process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
     console.log('\n🛑 Chiusura server...');
-    await closeConnection();
+    await prisma.$disconnect();
     process.exit(0);
 });
 

@@ -154,7 +154,7 @@ export class GeminiLiveSession {
 
     try {
       this.sessionPromise = this.ai.live.connect({
-        model: 'models/gemini-2.0-flash-exp', // Try with full path
+        model: 'gemini-2.0-flash-exp',
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
@@ -278,9 +278,15 @@ export class GeminiLiveSession {
               }
             }
           },
-          onclose: () => {
+          onclose: (event: any) => {
             console.log("GEMINI: onclose callback triggered"); // DEBUG
-            config.onLog("Sessione chiusa dal server.", "info");
+            console.log("Close event:", event); // DEBUG - mostra dettagli chiusura
+            if (event && event.code) {
+              console.log("Close code:", event.code, "Reason:", event.reason);
+              config.onLog(`Sessione chiusa: Code ${event.code} - ${event.reason || 'Nessun motivo fornito'}`, "error");
+            } else {
+              config.onLog("Sessione chiusa dal server.", "info");
+            }
             this.stop();
             config.onClose();
           },

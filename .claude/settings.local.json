@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx prisma generate:*)",
+      "Bash(cat:*)",
+      "Bash(npx prisma@6.19.0 generate:*)",
+      "Bash(npx prisma@6.19.0 migrate dev:*)",
+      "Bash(npm run dev)",
+      "Bash(curl:*)",
+      "Bash(npx prisma@6.19.0 studio)",
+      "Bash(npm install)",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

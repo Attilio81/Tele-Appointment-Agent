@@ -1,4 +1,5 @@
-import { getConnectionPool, sql } from '../config/database';
+import prisma from '../config/database';
+import { Appointment as PrismaAppointment, Slot as PrismaSlot } from '@prisma/client';
 
 export interface AvailableSlot {
     SlotID: number;
@@ -24,6 +25,7 @@ export interface Appointment {
     Notes?: string;
     Status: string;
     BookedAt: Date;
+    CancelledAt?: Date;
 }
 
 export interface CreateAppointmentInput {
@@ -35,33 +37,82 @@ export interface CreateAppointmentInput {
     notes?: string;
 }
 
+// Helper per formattare date
+function formatDate(date: Date): string {
+    return date.toISOString().split('T')[0]; // YYYY-MM-DD
+}
+
+function mapSlot(slot: PrismaSlot): AvailableSlot {
+    return {
+        SlotID: slot.id,
+        Date: slot.date,
+        StartTime: slot.startTime,
+        EndTime: slot.endTime,
+        IsBooked: slot.isBooked,
+        MaxCapacity: slot.maxCapacity,
+        CurrentBookings: slot.currentBookings,
+        SlotsRemaining: slot.maxCapacity - slot.currentBookings,
+        FormattedDate: formatDate(slot.date),
+        FormattedStartTime: slot.startTime.substring(0, 5),
+        FormattedEndTime: slot.endTime.substring(0, 5),
+    };
+}
+
+function mapAppointment(app: PrismaAppointment): Appointment {
+    return {
+        AppointmentID: app.id,
+        SlotID: app.slotId,
+        CustomerName: app.customerName,
+        CustomerPhone: app.customerPhone || undefined,
+        CustomerEmail: app.customerEmail || undefined,
+        AppointmentType: app.appointmentType || undefined,
+        Notes: app.notes || undefined,
+        Status: app.status,
+        BookedAt: app.bookedAt,
+        CancelledAt: app.cancelledAt || undefined,
+    };
+}
+
 export class DbService {
     /**
      * Ottieni tutti gli slot disponibili (da oggi in poi)
      */
     static async getAvailableSlots(): Promise<AvailableSlot[]> {
-        const pool = await getConnectionPool();
-        const result = await pool.request().query<AvailableSlot>(`
-      SELECT * FROM vw_AvailableSlots
-      ORDER BY Date, StartTime
-    `);
-        return result.recordset;
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const slots = await prisma.slot.findMany({
+            where: {
+                date: {
+                    gte: today,
+                },
+                isBooked: false,
+            },
+            orderBy: [
+                { date: 'asc' },
+                { startTime: 'asc' },
+            ],
+        });
+
+        return slots.map(mapSlot);
     }
 
     /**
      * Ottieni gli slot per una data specifica
      */
     static async getSlotsByDate(date: string): Promise<AvailableSlot[]> {
-        const pool = await getConnectionPool();
-        const result = await pool
-            .request()
-            .input('date', sql.Date, date)
-            .query<AvailableSlot>(`
-        SELECT * FROM vw_AvailableSlots
-        WHERE Date = @date
-        ORDER BY StartTime
-      `);
-        return result.recordset;
+        const searchDate = new Date(date);
+
+        const slots = await prisma.slot.findMany({
+            where: {
+                date: searchDate,
+            },
+            orderBy: {
+                startTime: 'asc',
+            },
+        });
+
+        return slots.map(mapSlot);
     }
 
     /**
@@ -71,17 +122,20 @@ export class DbService {
         startDate: string,
         endDate: string
     ): Promise<AvailableSlot[]> {
-        const pool = await getConnectionPool();
-        const result = await pool
-            .request()
-            .input('startDate', sql.Date, startDate)
-            .input('endDate', sql.Date, endDate)
-            .query<AvailableSlot>(`
-        SELECT * FROM vw_AvailableSlots
-        WHERE Date BETWEEN @startDate AND @endDate
-        ORDER BY Date, StartTime
-      `);
-        return result.recordset;
+        const slots = await prisma.slot.findMany({
+            where: {
+                date: {
+                    gte: new Date(startDate),
+                    lte: new Date(endDate),
+                },
+            },
+            orderBy: [
+                { date: 'asc' },
+                { startTime: 'asc' },
+            ],
+        });
+
+        return slots.map(mapSlot);
     }
 
     /**
@@ -90,107 +144,140 @@ export class DbService {
     static async createAppointment(
         data: CreateAppointmentInput
     ): Promise<Appointment> {
-        const pool = await getConnectionPool();
+        return prisma.$transaction(async (tx) => {
+            // 1. Verifica slot
+            const slot = await tx.slot.findUnique({
+                where: { id: data.slotId },
+            });
 
-        // Verifica che lo slot sia disponibile
-        const slotCheck = await pool
-            .request()
-            .input('slotId', sql.Int, data.slotId)
-            .query(`
-        SELECT CurrentBookings, MaxCapacity 
-        FROM AvailableSlots 
-        WHERE SlotID = @slotId
-      `);
+            if (!slot) {
+                throw new Error('Slot non trovato');
+            }
 
-        if (slotCheck.recordset.length === 0) {
-            throw new Error('Slot non trovato');
-        }
+            if (slot.currentBookings >= slot.maxCapacity) {
+                throw new Error('Slot non disponibile - capacità massima raggiunta');
+            }
 
-        const slot = slotCheck.recordset[0];
-        if (slot.CurrentBookings >= slot.MaxCapacity) {
-            throw new Error('Slot non disponibile - capacità massima raggiunta');
-        }
+            // 2. Crea appuntamento
+            const appointment = await tx.appointment.create({
+                data: {
+                    slotId: data.slotId,
+                    customerName: data.customerName,
+                    customerPhone: data.customerPhone,
+                    customerEmail: data.customerEmail,
+                    appointmentType: data.appointmentType,
+                    notes: data.notes,
+                    status: 'Confermato',
+                },
+            });
 
-        // Inserisci l'appuntamento
-        const result = await pool
-            .request()
-            .input('slotId', sql.Int, data.slotId)
-            .input('customerName', sql.NVarChar, data.customerName)
-            .input('customerPhone', sql.NVarChar, data.customerPhone || null)
-            .input('customerEmail', sql.NVarChar, data.customerEmail || null)
-            .input('appointmentType', sql.NVarChar, data.appointmentType || null)
-            .input('notes', sql.NVarChar, data.notes || null)
-            .query<Appointment>(`
-        INSERT INTO Appointments 
-        (SlotID, CustomerName, CustomerPhone, CustomerEmail, AppointmentType, Notes, Status)
-        OUTPUT INSERTED.*
-        VALUES (@slotId, @customerName, @customerPhone, @customerEmail, @appointmentType, @notes, 'Confermato')
-      `);
+            // 3. Aggiorna slot
+            const newBookings = slot.currentBookings + 1;
+            await tx.slot.update({
+                where: { id: slot.id },
+                data: {
+                    currentBookings: newBookings,
+                    isBooked: newBookings >= slot.maxCapacity,
+                },
+            });
 
-        return result.recordset[0];
+            return mapAppointment(appointment);
+        });
     }
 
     /**
      * Ottieni un appuntamento specifico per ID
      */
     static async getAppointmentById(id: number): Promise<Appointment | null> {
-        const pool = await getConnectionPool();
-        const result = await pool
-            .request()
-            .input('id', sql.Int, id)
-            .query<Appointment>(`
-        SELECT * FROM Appointments
-        WHERE AppointmentID = @id
-      `);
+        const appointment = await prisma.appointment.findUnique({
+            where: { id },
+        });
 
-        return result.recordset[0] || null;
+        return appointment ? mapAppointment(appointment) : null;
     }
 
     /**
      * Cancella un appuntamento
      */
     static async cancelAppointment(id: number): Promise<Appointment> {
-        const pool = await getConnectionPool();
+        return prisma.$transaction(async (tx) => {
+            const appointment = await tx.appointment.findUnique({
+                where: { id },
+            });
 
-        // Verifica che l'appuntamento esista
-        const existing = await this.getAppointmentById(id);
-        if (!existing) {
-            throw new Error('Appuntamento non trovato');
-        }
+            if (!appointment) {
+                throw new Error('Appuntamento non trovato');
+            }
 
-        if (existing.Status === 'Cancellato') {
-            throw new Error('Appuntamento già cancellato');
-        }
+            if (appointment.status === 'Cancellato') {
+                throw new Error('Appuntamento già cancellato');
+            }
 
-        // Aggiorna lo stato
-        const result = await pool
-            .request()
-            .input('id', sql.Int, id)
-            .query<Appointment>(`
-        UPDATE Appointments
-        SET Status = 'Cancellato', CancelledAt = GETDATE()
-        OUTPUT INSERTED.*
-        WHERE AppointmentID = @id
-      `);
+            // Aggiorna appuntamento
+            const updatedAppointment = await tx.appointment.update({
+                where: { id },
+                data: {
+                    status: 'Cancellato',
+                    cancelledAt: new Date(),
+                },
+            });
 
-        return result.recordset[0];
+            // Libera lo slot
+            await tx.slot.update({
+                where: { id: appointment.slotId },
+                data: {
+                    currentBookings: { decrement: 1 },
+                    isBooked: false,
+                },
+            });
+
+            return mapAppointment(updatedAppointment);
+        });
     }
 
     /**
-     * Genera slot per un range di date (chiama la stored procedure)
+     * Genera slot per un range di date
      */
     static async generateSlots(
-        startDate: string,
-        endDate: string
+        startDateStr: string,
+        endDateStr: string
     ): Promise<{ message: string }> {
-        const pool = await getConnectionPool();
+        const start = new Date(startDateStr);
+        const end = new Date(endDateStr);
 
-        await pool
-            .request()
-            .input('StartDate', sql.Date, startDate)
-            .input('EndDate', sql.Date, endDate)
-            .execute('sp_GenerateSlots');
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+            const timeSlots = [
+                "09:00", "09:30", "10:00", "10:30", "11:00", "11:30",
+                "12:00", "12:30", "14:00", "14:30", "15:00", "15:30",
+                "16:00", "16:30", "17:00", "17:30"
+            ];
 
-        return { message: `Slot generati dal ${startDate} al ${endDate}` };
+            for (const time of timeSlots) {
+                const [hours, minutes] = time.split(':').map(Number);
+                const endDate = new Date(d);
+                endDate.setHours(hours, minutes + 30);
+                const endTime = `${endDate.getHours().toString().padStart(2, '0')}:${endDate.getMinutes().toString().padStart(2, '0')}`;
+
+                const existing = await prisma.slot.findFirst({
+                    where: {
+                        date: d,
+                        startTime: time
+                    }
+                });
+
+                if (!existing) {
+                    await prisma.slot.create({
+                        data: {
+                            date: d,
+                            startTime: time,
+                            endTime: endTime,
+                            maxCapacity: 1,
+                        }
+                    });
+                }
+            }
+        }
+
+        return { message: `Slot generati dal ${startDateStr} al ${endDateStr}` };
     }
 }

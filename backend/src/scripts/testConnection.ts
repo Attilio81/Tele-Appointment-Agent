@@ -1,43 +1,29 @@
-import { getConnectionPool, closeConnection } from '../config/database';
+import prisma from '../config/database';
 
 async function testConnection() {
     try {
-        console.log('🔄 Test connessione SQL Server...\n');
+        console.log('🔄 Test connessione SQLite + Prisma...\n');
 
-        const pool = await getConnectionPool();
+        await prisma.$connect();
         console.log('✅ Connessione stabilita!\n');
 
-        // Test query
-        const result = await pool.request().query('SELECT @@VERSION AS Version');
-        console.log('📊 Versione SQL Server:');
-        console.log(result.recordset[0].Version);
+        // Test query - count slots
+        const slotCount = await prisma.slot.count();
+        console.log('📊 Numero di slot nel database:', slotCount);
         console.log('\n');
 
-        // Test database
-        const dbResult = await pool.request().query('SELECT DB_NAME() AS CurrentDB');
-        console.log('💾 Database corrente:', dbResult.recordset[0].CurrentDB);
+        // Test query - count appointments
+        const appointmentCount = await prisma.appointment.count();
+        console.log('📋 Numero di appuntamenti:', appointmentCount);
         console.log('\n');
 
-        // Test tabelle
-        const tablesResult = await pool.request().query(`
-      SELECT TABLE_NAME 
-      FROM INFORMATION_SCHEMA.TABLES 
-      WHERE TABLE_TYPE = 'BASE TABLE'
-      ORDER BY TABLE_NAME
-    `);
+        console.log('✅ Test completato con successo!');
 
-        console.log('📋 Tabelle disponibili:');
-        tablesResult.recordset.forEach((table: any) => {
-            console.log(`  - ${table.TABLE_NAME}`);
-        });
-
-        console.log('\n✅ Test completato con successo!');
-
-        await closeConnection();
+        await prisma.$disconnect();
         process.exit(0);
     } catch (error) {
         console.error('❌ Errore durante il test:', error);
-        await closeConnection();
+        await prisma.$disconnect();
         process.exit(1);
     }
 }
