@@ -85,6 +85,7 @@ const App: React.FC = () => {
       await session.start({
         voiceName: config.voiceName,
         systemInstruction: `Stai parlando con ${client.name}. ${config.systemInstruction}`,
+        clientName: client.name, // Pass client name for booking
         onLog: addLog,
         onBookAppointment: (appt: Appointment) => {
           addLog(`Prenotazione ricevuta per ${appt.date} alle ${appt.time}`, 'success');

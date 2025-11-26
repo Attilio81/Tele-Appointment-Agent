@@ -1,28 +1,68 @@
 import { GoogleGenAI, LiveServerMessage, Modality, Type, FunctionDeclaration } from '@google/genai';
 import { createBlob, base64ToUint8Array, decodeAudioData, downsampleTo16000 } from './audioUtils';
 import { Client, Appointment } from '../types';
+import { fetchAvailableSlots, bookAppointment, cancelAppointment, AvailableSlot } from './appointmentService';
 
-// Function definition for booking
-const bookAppointmentTool: FunctionDeclaration = {
-  name: 'prenotaAppuntamento',
-  description: 'Prenota un appuntamento finale quando il cliente è d\'accordo con una data e un\'ora.',
+// Tool: Check Availability
+const checkAvailabilityTool: FunctionDeclaration = {
+  name: 'checkAvailability',
+  description: 'Controlla la disponibilità degli appuntamenti. Restituisce una lista di slot disponibili con ID, data e ora.',
   parameters: {
     type: Type.OBJECT,
     properties: {
+      date: {
+        type: Type.STRING,
+        description: 'Data specifica per controllare la disponibilità (YYYY-MM-DD). Opzionale.',
+      },
+    },
+  },
+};
+
+// Tool: Book Appointment
+const bookAppointmentTool: FunctionDeclaration = {
+  name: 'prenotaAppuntamento',
+  description: 'Prenota un appuntamento. Richiede ID dello slot (preferito) oppure data e ora.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      slotId: {
+        type: Type.NUMBER,
+        description: 'ID dello slot da prenotare (ottenuto da checkAvailability).',
+      },
       data: {
         type: Type.STRING,
-        description: 'La data dell\'appuntamento (es. "2024-05-20" o "Lunedì prossimo").',
+        description: 'La data dell\'appuntamento (YYYY-MM-DD). Usato se slotId non è fornito.',
       },
       ora: {
         type: Type.STRING,
-        description: 'L\'ora dell\'appuntamento (es. "15:00").',
+        description: 'L\'ora dell\'appuntamento (HH:MM). Usato se slotId non è fornito.',
       },
       note: {
         type: Type.STRING,
-        description: 'Eventuali note aggiuntive richieste dal cliente.',
+        description: 'Eventuali note aggiuntive.',
       },
     },
-    required: ['data', 'ora'],
+    required: [],
+  },
+};
+
+// Tool: Cancel Appointment
+const cancelAppointmentTool: FunctionDeclaration = {
+  name: 'cancellareAppuntamento',
+  description: 'Cancella un appuntamento esistente. Richiede ID dell\'appuntamento.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      appointmentId: {
+        type: Type.NUMBER,
+        description: 'ID dell\'appuntamento da cancellare.',
+      },
+      reason: {
+        type: Type.STRING,
+        description: 'Motivo della cancellazione (opzionale).',
+      },
+    },
+    required: ['appointmentId'],
   },
 };
 
@@ -33,6 +73,7 @@ interface GeminiSessionConfig {
   onLog: (msg: string, type: 'info' | 'error' | 'success' | 'agent' | 'user') => void;
   onBookAppointment: (appt: Appointment) => void;
   onClose: () => void;
+  clientName: string; // Add client name for booking
 }
 
 export class GeminiLiveSession {
@@ -46,7 +87,7 @@ export class GeminiLiveSession {
   private active: boolean = false;
 
   constructor() {
-    this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    this.ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
   }
 
   async start(config: GeminiSessionConfig) {
@@ -91,14 +132,14 @@ export class GeminiLiveSession {
     config.onLog("Connessione a Gemini Live API in corso...", "info");
 
     this.sessionPromise = this.ai.live.connect({
-      model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+      model: 'gemini-2.0-flash-exp', // Updated model
       config: {
         responseModalities: [Modality.AUDIO],
         speechConfig: {
           voiceConfig: { prebuiltVoiceConfig: { voiceName: config.voiceName } },
         },
         systemInstruction: config.systemInstruction,
-        tools: [{ functionDeclarations: [bookAppointmentTool] }],
+        tools: [{ functionDeclarations: [checkAvailabilityTool, bookAppointmentTool, cancelAppointmentTool] }],
       },
       callbacks: {
         onopen: () => {
@@ -109,28 +150,98 @@ export class GeminiLiveSession {
           // Handle Tools
           if (message.toolCall) {
             for (const fc of message.toolCall.functionCalls) {
-              config.onLog(`Tentativo di prenotazione: ${JSON.stringify(fc.args)}`, "info");
+              config.onLog(`Richiesta Tool: ${fc.name} ${JSON.stringify(fc.args)}`, "info");
 
-              if (fc.name === 'prenotaAppuntamento') {
-                const appointment: Appointment = {
-                  date: fc.args['data'] as string,
-                  time: fc.args['ora'] as string,
-                  notes: fc.args['note'] as string || ''
-                };
-                config.onBookAppointment(appointment);
+              let toolResponse = {};
 
-                // Respond to tool
-                if (this.sessionPromise) {
-                  this.sessionPromise.then(session => {
-                    session.sendToolResponse({
-                      functionResponses: {
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: "Successo. Appuntamento confermato nel sistema." }
-                      }
-                    });
-                  });
+              try {
+                if (fc.name === 'checkAvailability') {
+                  const date = fc.args['date'] as string | undefined;
+                  const slots = await fetchAvailableSlots(); // Fetch all future slots
+
+                  // Filter by date if provided
+                  let filteredSlots = slots;
+                  if (date) {
+                    filteredSlots = slots.filter(s => s.Date.startsWith(date));
+                  }
+
+                  // Limit results to avoid token limit issues
+                  const limitedSlots = filteredSlots.slice(0, 10).map(s => ({
+                    id: s.SlotID,
+                    date: s.FormattedDate,
+                    time: `${s.FormattedStartTime} - ${s.FormattedEndTime}`
+                  }));
+
+                  toolResponse = { result: limitedSlots };
+                  config.onLog(`Trovati ${limitedSlots.length} slot disponibili`, "success");
                 }
+                else if (fc.name === 'prenotaAppuntamento') {
+                  const slotId = fc.args['slotId'] as number | undefined;
+                  const date = fc.args['data'] as string | undefined;
+                  const time = fc.args['ora'] as string | undefined;
+                  const notes = fc.args['note'] as string || '';
+
+                  let targetSlotId = slotId;
+
+                  // If slotId not provided, try to find it by date/time
+                  if (!targetSlotId && date && time) {
+                    const slots = await fetchAvailableSlots();
+                    const found = slots.find(s =>
+                      (s.Date.startsWith(date) || s.FormattedDate === date) &&
+                      s.FormattedStartTime.startsWith(time)
+                    );
+                    if (found) targetSlotId = found.SlotID;
+                  }
+
+                  if (targetSlotId) {
+                    const result = await bookAppointment({
+                      slotId: targetSlotId,
+                      customerName: config.clientName,
+                      notes: notes,
+                      appointmentType: 'Check-up'
+                    });
+
+                    const appointment: Appointment = {
+                      date: date || result.BookedAt, // Fallback
+                      time: time || "00:00", // Fallback
+                      notes: notes
+                    };
+                    config.onBookAppointment(appointment);
+                    toolResponse = { result: "Successo. Appuntamento confermato nel sistema." };
+                    config.onLog(`Appuntamento confermato: ID ${result.AppointmentID}`, "success");
+                  } else {
+                    toolResponse = { error: "Impossibile trovare uno slot valido con i dati forniti. Chiedi all'utente di selezionare uno slot disponibile." };
+                    config.onLog("Fallimento prenotazione: Slot non trovato", "error");
+                  }
+                }
+                else if (fc.name === 'cancellareAppuntamento') {
+                  const appointmentId = fc.args['appointmentId'] as number;
+                  const reason = fc.args['reason'] as string || '';
+
+                  if (appointmentId) {
+                    await cancelAppointment(appointmentId);
+                    toolResponse = { result: "Successo. Appuntamento cancellato." };
+                    config.onLog(`Appuntamento ${appointmentId} cancellato. Motivo: ${reason}`, "success");
+                  } else {
+                    toolResponse = { error: "ID appuntamento mancante." };
+                  }
+                }
+              } catch (error: any) {
+                toolResponse = { error: `Errore esecuzione tool: ${error.message}` };
+                config.onLog(`Errore Tool: ${error.message}`, "error");
+              }
+
+              // Respond to tool
+              if (this.sessionPromise) {
+                this.sessionPromise.then(session => {
+                  session.sendToolResponse({
+                    functionResponses: {
+                      id: fc.id,
+                      name: fc.name,
+                      response: toolResponse
+                    }
+                  });
+                });
               }
             }
           }
