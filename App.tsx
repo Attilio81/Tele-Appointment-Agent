@@ -48,14 +48,21 @@ const App: React.FC = () => {
   }, []);
 
   const handleStartCall = (client: Client) => {
+    console.log("handleStartCall called for:", client.name); // DEBUG
     if (activeClientId) return;
     setPendingClient(client);
     setShowMicModal(true);
+    console.log("Modal should be shown now"); // DEBUG
   };
 
   const proceedWithCall = async () => {
-    if (!pendingClient) return;
+    console.log("proceedWithCall called"); // DEBUG
+    if (!pendingClient) {
+      console.error("No pending client!"); // DEBUG
+      return;
+    }
     const client = pendingClient;
+    console.log("Processing call for:", client.name); // DEBUG
     setShowMicModal(false);
     setPendingClient(null);
 
@@ -66,22 +73,26 @@ const App: React.FC = () => {
     addLog(`Avvio simulazione chiamata verso ${client.phoneNumber}...`, 'info');
 
     try {
+      console.log("Creating AudioContext..."); // DEBUG
       // Create a new AudioContext for playback (needs user interaction which click provides)
       // Don't force sampleRate, let browser handle it.
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
 
       // CRITICAL: Ensure context is running. Browsers often suspend it.
       if (audioCtx.state === 'suspended') {
+        console.log("AudioContext suspended, resuming..."); // DEBUG
         await audioCtx.resume();
       }
 
       audioContextRef.current = audioCtx;
       nextStartTimeRef.current = audioCtx.currentTime;
 
+      console.log("Creating GeminiLiveSession..."); // DEBUG
       // Initialize Session
       const session = new GeminiLiveSession();
       sessionRef.current = session;
 
+      console.log("Calling session.start()..."); // DEBUG
       await session.start({
         voiceName: config.voiceName,
         systemInstruction: `Stai parlando con ${client.name}. ${config.systemInstruction}`,
@@ -121,8 +132,10 @@ const App: React.FC = () => {
         }
       });
 
+      console.log("session.start() completed"); // DEBUG
       setClients(prev => prev.map(c => c.id === client.id ? { ...c, status: CallStatus.CONNECTED } : c));
     } catch (err) {
+      console.error("Error in proceedWithCall:", err); // DEBUG
       addLog(`Errore inizializzazione audio: ${err}`, 'error');
       handleHangup();
     }

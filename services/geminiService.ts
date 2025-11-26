@@ -91,15 +91,21 @@ export class GeminiLiveSession {
   }
 
   async start(config: GeminiSessionConfig) {
+    console.log("GeminiLiveSession.start called"); // DEBUG
     this.active = true;
+    config.onLog("Inizializzazione sessione...", "info");
 
     // Setup Audio Contexts without forcing sampleRate
     this.inputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
     this.outputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
 
     try {
+      config.onLog("Richiesta accesso al microfono...", "info");
+      console.log("Requesting microphone access..."); // DEBUG
       if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
         this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        console.log("Microphone access granted"); // DEBUG
+        config.onLog("Microfono acquisito.", "success");
       } else {
         // Fallback for older browsers or specific environments
         const getUserMedia = (navigator as any).webkitGetUserMedia || (navigator as any).mozGetUserMedia;
@@ -111,9 +117,13 @@ export class GeminiLiveSession {
         this.stream = await new Promise((resolve, reject) => {
           getUserMedia.call(navigator, { audio: true }, resolve, reject);
         });
+        console.log("Microphone access granted (fallback)"); // DEBUG
+        config.onLog("Microfono acquisito (fallback).", "success");
       }
     } catch (e: any) {
-      console.error("Microphone access error:", e);
+      console.error("Microphone error:", e); // DEBUG
+      alert(`Errore Microfono: ${e.message}`); // DEBUG ALERT
+      // ... existing error handling ...
       let errorMessage = "Errore accesso microfono. ";
       if (e.name === 'NotAllowedError') {
         errorMessage += "Permesso negato. Controlla le impostazioni del browser.";
@@ -129,147 +139,171 @@ export class GeminiLiveSession {
       return;
     }
 
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+    console.log("API Key check:", apiKey ? "Present" : "Missing"); // DEBUG
+    if (apiKey && apiKey.length > 0) {
+      config.onLog(`API Key rilevata: ${apiKey.substring(0, 4)}...`, "info");
+    } else {
+      console.error("API KEY MISSING"); // DEBUG
+      alert("ATTENZIONE: API Key mancante! Controlla .env.local"); // DEBUG ALERT
+      config.onLog("ATTENZIONE: API Key mancante o vuota!", "error");
+    }
+
     config.onLog("Connessione a Gemini Live API in corso...", "info");
+    console.log("About to call this.ai.live.connect with model: models/gemini-2.0-flash-exp"); // DEBUG
 
-    this.sessionPromise = this.ai.live.connect({
-      model: 'gemini-2.0-flash-exp', // Updated model
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: config.voiceName } },
+    try {
+      this.sessionPromise = this.ai.live.connect({
+        model: 'models/gemini-2.0-flash-exp', // Try with full path
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: config.voiceName } },
+          },
+          systemInstruction: config.systemInstruction,
+          tools: [{ functionDeclarations: [checkAvailabilityTool, bookAppointmentTool, cancelAppointmentTool] }],
         },
-        systemInstruction: config.systemInstruction,
-        tools: [{ functionDeclarations: [checkAvailabilityTool, bookAppointmentTool, cancelAppointmentTool] }],
-      },
-      callbacks: {
-        onopen: () => {
-          config.onLog("Connessione stabilita. In attesa di risposta...", "success");
-          this.startAudioStreaming();
-        },
-        onmessage: async (message: LiveServerMessage) => {
-          // Handle Tools
-          if (message.toolCall) {
-            for (const fc of message.toolCall.functionCalls) {
-              config.onLog(`Richiesta Tool: ${fc.name} ${JSON.stringify(fc.args)}`, "info");
+        callbacks: {
+          onopen: () => {
+            console.log("GEMINI: onopen callback triggered"); // DEBUG
+            config.onLog("Connessione stabilita. In attesa di risposta...", "success");
+            this.startAudioStreaming();
+          },
+          onmessage: async (message: LiveServerMessage) => {
+            console.log("GEMINI: onmessage callback triggered", message); // DEBUG
+            // Handle Tools
+            if (message.toolCall) {
+              for (const fc of message.toolCall.functionCalls) {
+                config.onLog(`Richiesta Tool: ${fc.name} ${JSON.stringify(fc.args)}`, "info");
 
-              let toolResponse = {};
+                let toolResponse = {};
 
-              try {
-                if (fc.name === 'checkAvailability') {
-                  const date = fc.args['date'] as string | undefined;
-                  const slots = await fetchAvailableSlots(); // Fetch all future slots
-
-                  // Filter by date if provided
-                  let filteredSlots = slots;
-                  if (date) {
-                    filteredSlots = slots.filter(s => s.Date.startsWith(date));
-                  }
-
-                  // Limit results to avoid token limit issues
-                  const limitedSlots = filteredSlots.slice(0, 10).map(s => ({
-                    id: s.SlotID,
-                    date: s.FormattedDate,
-                    time: `${s.FormattedStartTime} - ${s.FormattedEndTime}`
-                  }));
-
-                  toolResponse = { result: limitedSlots };
-                  config.onLog(`Trovati ${limitedSlots.length} slot disponibili`, "success");
-                }
-                else if (fc.name === 'prenotaAppuntamento') {
-                  const slotId = fc.args['slotId'] as number | undefined;
-                  const date = fc.args['data'] as string | undefined;
-                  const time = fc.args['ora'] as string | undefined;
-                  const notes = fc.args['note'] as string || '';
-
-                  let targetSlotId = slotId;
-
-                  // If slotId not provided, try to find it by date/time
-                  if (!targetSlotId && date && time) {
+                try {
+                  if (fc.name === 'checkAvailability') {
+                    const date = fc.args['date'] as string | undefined;
                     const slots = await fetchAvailableSlots();
-                    const found = slots.find(s =>
-                      (s.Date.startsWith(date) || s.FormattedDate === date) &&
-                      s.FormattedStartTime.startsWith(time)
-                    );
-                    if (found) targetSlotId = found.SlotID;
-                  }
 
-                  if (targetSlotId) {
-                    const result = await bookAppointment({
-                      slotId: targetSlotId,
-                      customerName: config.clientName,
-                      notes: notes,
-                      appointmentType: 'Check-up'
-                    });
-
-                    const appointment: Appointment = {
-                      date: date || result.BookedAt, // Fallback
-                      time: time || "00:00", // Fallback
-                      notes: notes
-                    };
-                    config.onBookAppointment(appointment);
-                    toolResponse = { result: "Successo. Appuntamento confermato nel sistema." };
-                    config.onLog(`Appuntamento confermato: ID ${result.AppointmentID}`, "success");
-                  } else {
-                    toolResponse = { error: "Impossibile trovare uno slot valido con i dati forniti. Chiedi all'utente di selezionare uno slot disponibile." };
-                    config.onLog("Fallimento prenotazione: Slot non trovato", "error");
-                  }
-                }
-                else if (fc.name === 'cancellareAppuntamento') {
-                  const appointmentId = fc.args['appointmentId'] as number;
-                  const reason = fc.args['reason'] as string || '';
-
-                  if (appointmentId) {
-                    await cancelAppointment(appointmentId);
-                    toolResponse = { result: "Successo. Appuntamento cancellato." };
-                    config.onLog(`Appuntamento ${appointmentId} cancellato. Motivo: ${reason}`, "success");
-                  } else {
-                    toolResponse = { error: "ID appuntamento mancante." };
-                  }
-                }
-              } catch (error: any) {
-                toolResponse = { error: `Errore esecuzione tool: ${error.message}` };
-                config.onLog(`Errore Tool: ${error.message}`, "error");
-              }
-
-              // Respond to tool
-              if (this.sessionPromise) {
-                this.sessionPromise.then(session => {
-                  session.sendToolResponse({
-                    functionResponses: {
-                      id: fc.id,
-                      name: fc.name,
-                      response: toolResponse
+                    let filteredSlots = slots;
+                    if (date) {
+                      filteredSlots = slots.filter(s => s.Date.startsWith(date));
                     }
+
+                    const limitedSlots = filteredSlots.slice(0, 10).map(s => ({
+                      id: s.SlotID,
+                      date: s.FormattedDate,
+                      time: `${s.FormattedStartTime} - ${s.FormattedEndTime}`
+                    }));
+
+                    toolResponse = { result: limitedSlots };
+                    config.onLog(`Trovati ${limitedSlots.length} slot disponibili`, "success");
+                  }
+                  else if (fc.name === 'prenotaAppuntamento') {
+                    const slotId = fc.args['slotId'] as number | undefined;
+                    const date = fc.args['data'] as string | undefined;
+                    const time = fc.args['ora'] as string | undefined;
+                    const notes = fc.args['note'] as string || '';
+
+                    let targetSlotId = slotId;
+
+                    if (!targetSlotId && date && time) {
+                      const slots = await fetchAvailableSlots();
+                      const found = slots.find(s =>
+                        (s.Date.startsWith(date) || s.FormattedDate === date) &&
+                        s.FormattedStartTime.startsWith(time)
+                      );
+                      if (found) targetSlotId = found.SlotID;
+                    }
+
+                    if (targetSlotId) {
+                      const result = await bookAppointment({
+                        slotId: targetSlotId,
+                        customerName: config.clientName,
+                        notes: notes,
+                        appointmentType: 'Check-up'
+                      });
+
+                      const appointment: Appointment = {
+                        date: date || result.BookedAt,
+                        time: time || "00:00",
+                        notes: notes
+                      };
+                      config.onBookAppointment(appointment);
+                      toolResponse = { result: "Successo. Appuntamento confermato nel sistema." };
+                      config.onLog(`Appuntamento confermato: ID ${result.AppointmentID}`, "success");
+                    } else {
+                      toolResponse = { error: "Impossibile trovare uno slot valido con i dati forniti. Chiedi all'utente di selezionare uno slot disponibile." };
+                      config.onLog("Fallimento prenotazione: Slot non trovato", "error");
+                    }
+                  }
+                  else if (fc.name === 'cancellareAppuntamento') {
+                    const appointmentId = fc.args['appointmentId'] as number;
+                    const reason = fc.args['reason'] as string || '';
+
+                    if (appointmentId) {
+                      await cancelAppointment(appointmentId);
+                      toolResponse = { result: "Successo. Appuntamento cancellato." };
+                      config.onLog(`Appuntamento ${appointmentId} cancellato. Motivo: ${reason}`, "success");
+                    } else {
+                      toolResponse = { error: "ID appuntamento mancante." };
+                    }
+                  }
+                } catch (error: any) {
+                  toolResponse = { error: `Errore esecuzione tool: ${error.message}` };
+                  config.onLog(`Errore Tool: ${error.message}`, "error");
+                }
+
+                if (this.sessionPromise) {
+                  this.sessionPromise.then(session => {
+                    session.sendToolResponse({
+                      functionResponses: {
+                        id: fc.id,
+                        name: fc.name,
+                        response: toolResponse
+                      }
+                    });
                   });
-                });
+                }
               }
             }
-          }
 
-          // Handle Audio
-          const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
-          if (base64Audio && this.outputAudioContext) {
-            try {
-              const rawBytes = base64ToUint8Array(base64Audio);
-              const audioBuffer = await decodeAudioData(rawBytes, this.outputAudioContext);
-              config.onAudioData(audioBuffer);
-            } catch (err) {
-              console.error("Error decoding audio:", err);
+            // Handle Audio
+            const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
+            if (base64Audio && this.outputAudioContext) {
+              try {
+                const rawBytes = base64ToUint8Array(base64Audio);
+                const audioBuffer = await decodeAudioData(rawBytes, this.outputAudioContext);
+                config.onAudioData(audioBuffer);
+              } catch (err) {
+                console.error("Error decoding audio:", err);
+              }
             }
+          },
+          onclose: () => {
+            console.log("GEMINI: onclose callback triggered"); // DEBUG
+            config.onLog("Sessione chiusa dal server.", "info");
+            this.stop();
+            config.onClose();
+          },
+          onerror: (err) => {
+            console.error("GEMINI: onerror callback triggered:", err); // DEBUG
+            config.onLog(`Errore Gemini: ${err}`, "error");
+            this.stop();
+            config.onClose();
           }
-        },
-        onclose: () => {
-          config.onLog("Sessione chiusa dal server.", "info");
-          this.stop();
-          config.onClose();
-        },
-        onerror: (err) => {
-          config.onLog(`Errore Gemini: ${err}`, "error");
-          this.stop();
-          config.onClose();
         }
-      }
-    });
+      });
+
+      this.sessionPromise.catch((err: any) => {
+        config.onLog(`Errore connessione WebSocket: ${err.message || err}`, "error");
+        this.stop();
+        config.onClose();
+      });
+
+    } catch (err: any) {
+      config.onLog(`Errore sincrono connessione: ${err.message}`, "error");
+      this.stop();
+      return;
+    }
   }
 
   private startAudioStreaming() {
